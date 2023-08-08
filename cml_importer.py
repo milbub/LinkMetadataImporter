@@ -32,7 +32,7 @@ file_handler.setLevel(logging.DEBUG)
 
 # create a console handler and set its level
 console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.DEBUG)
+console_handler.setLevel(logging.INFO)
 
 # create a formatter
 formatter = logging.Formatter('%(asctime)s - %(levelname)s: %(message)s')
@@ -142,10 +142,19 @@ def filter_data(df: pd.DataFrame) -> pd.DataFrame:
     df['NAST_A_polarizace'] = df.apply(process_polarization, src_col='Aktuální upgrade::A_rf_polarizace',
                                        dest_col='NAST_A_polarizace', axis=1)
 
+    # determine which ID column to use
+    id_column = '__pk_ID' if '__pk_ID' in df.columns else '__pk_ID_new_calc'
+
+    # before filling NaN, get the IDs of the rows where 'NAST_A_polarizace' is NaN for logging
+    rows_to_fill = df[df['NAST_A_polarizace'].isna()][id_column]
+    for id_value in rows_to_fill:
+        logger.debug(f"The CML {id_value} does not have filled polarization type. It has been filled with default "
+                     f"vertical polarization (V).")
+
     # default polarization is vertical
     df['NAST_A_polarizace'] = df['NAST_A_polarizace'].fillna('V')
 
-    # drop rows where processed columns are null
+    # drop rows where frequency columns are null
     df = df.dropna(subset=['NAST_A_frq', 'NAST_B_frq'])
 
     return df
