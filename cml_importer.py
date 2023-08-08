@@ -160,6 +160,22 @@ def filter_data(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def apply_corrections(main_df: pd.DataFrame, corrections_df: pd.DataFrame) -> pd.DataFrame:
+    # for each row in corrections_df
+    for _, row in corrections_df.iterrows():
+        # get the unique ID from the row
+        pk_id = row['__pk_ID']
+
+        # for each column in corrections_df, excluding 'KOMENTÁŘ'
+        for col in corrections_df.columns:
+            if col != 'KOMENTÁŘ' and pd.notna(row[col]):
+                # update the main_df with the value from corrections_df
+                main_df.loc[main_df['__pk_ID'] == pk_id, col] = row[col]
+
+                logger.debug(f"Applied correction of '{col}' with '{row[col]}' for CML {pk_id}.")
+    return main_df
+
+
 if __name__ == '__main__':
     args = sys.argv[1:]
     if len(args) >= 3:
@@ -245,6 +261,15 @@ if __name__ == '__main__':
     logger.info(f"MCL data filtering ended. {mcl_df.shape[0]} rows remained, {mcl_orig_count - mcl_df.shape[0]} rows "
                 f"dropped.")
     logger.info("**********************************************")
+
+    # apply corrections
+    logger.info("Correcting CBL data...")
+    cbl_df = apply_corrections(cbl_df, corrs_cbl_df)
+    logger.info("OK.")
+
+    logger.info("Correcting MCL data...")
+    mcl_df = apply_corrections(mcl_df, corrs_mcl_df)
+    logger.info("OK.")
 
 
 
