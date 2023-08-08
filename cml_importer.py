@@ -161,23 +161,65 @@ def filter_data(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def apply_corrections(main_df: pd.DataFrame, corrections_df: pd.DataFrame) -> pd.DataFrame:
+    # determine which ID column to use
+    id_column = '__pk_ID' if '__pk_ID' in main_df.columns else '__pk_ID_new_calc'
+
     # for each row in corrections_df
     for _, row in corrections_df.iterrows():
         # get the unique ID from the row
-        pk_id = row['__pk_ID']
+        pk_id = row[id_column]
 
         # for each column in corrections_df, excluding 'KOMENTÁŘ'
         for col in corrections_df.columns:
             if col != 'KOMENTÁŘ' and pd.notna(row[col]):
                 # update the main_df with the value from corrections_df
-                main_df.loc[main_df['__pk_ID'] == pk_id, col] = row[col]
+                main_df.loc[main_df[id_column] == pk_id, col] = row[col]
 
                 logger.debug(f"Applied correction of '{col}' with '{row[col]}' for CML {pk_id}.")
     return main_df
 
 
+def drop_duplicate_ips(df: pd.DataFrame) -> pd.DataFrame:
+    # determine which ID column to use
+    id_column = '__pk_ID' if '__pk_ID' in df.columns else '__pk_ID_new_calc'
+
+    # combine the IPs from 'A IP adresa' and 'B IP adresa'
+    combined_ips = df['A IP adresa'].tolist() + df['B IP adresa'].tolist()
+
+    # convert combined list into a set to get unique IPs
+    unique_ips = set(combined_ips)
+
+    # counter for dropped rows
+    dropped_count = 0
+
+    # for each unique IP, identify rows where it occurs in 'A IP adresa' or 'B IP adresa'
+    for ip in unique_ips:
+        # get all rows where IP is in 'A IP adresa' or 'B IP adresa'
+        duplicate_rows = df[(df['A IP adresa'] == ip) | (df['B IP adresa'] == ip)]
+
+        # if there's more than one row with this IP
+        if len(duplicate_rows) > 1:
+            # sort the rows by '__pk_ID' in descending order and drop all but the first row
+            duplicate_rows = duplicate_rows.sort_values(by=id_column, ascending=False)
+
+            # print the __pk_IDs of the rows being dropped
+            for dropped_id in duplicate_rows.iloc[1:][id_column]:
+                logger.debug(f"Dropped CML {dropped_id} doe to its duplicate IP address {ip}.")
+                dropped_count += 1
+
+            # drop the rows from the main dataframe
+            df = df.drop(duplicate_rows.iloc[1:].index)
+
+    logger.info(f"Total of {dropped_count} rows were dropped due to duplicate IP.")
+
+    return df
+
+
 if __name__ == '__main__':
     args = sys.argv[1:]
+
+    # if arguments are provided, use them. If not, user will be prompted for the input.
+    # arguments are in order: CBL xlsx, MCL xlsx, corrections xlsx, DB INI config (optional, default is root dir)
     if len(args) >= 3:
         cbl_xlsx_path = args[0]
         mcl_xlsx_path = args[1]
@@ -271,6 +313,13 @@ if __name__ == '__main__':
     mcl_df = apply_corrections(mcl_df, corrs_mcl_df)
     logger.info("OK.")
 
+    # remove duplicate IPs
+    logger.info("**********************************************")
+    logger.info("Remove duplicate IPs from CBL data...")
+    cbl_df = drop_duplicate_ips(cbl_df)
+    logger.info("Remove duplicate IPs from MCL data...")
+    mcl_df = drop_duplicate_ips(mcl_df)
+    logger.info("**********************************************")
 
 
 
