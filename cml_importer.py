@@ -3,6 +3,7 @@ from datetime import datetime
 from pathlib import Path
 import sys
 import pandas as pd
+import numpy as np
 import mariadb
 import configparser
 import logging
@@ -13,6 +14,12 @@ import re
 This script is used for import of CML metadata of specific CML ISP into the Telcorain's SQL database structure.
 This script IS NOT UNIVERSAL in any way nor is designed like that.
 """
+
+
+AREA_BORDER_X_MIN = 11
+AREA_BORDER_X_MAX = 20
+AREA_BORDER_Y_MIN = 48
+AREA_BORDER_Y_MAX = 52
 
 
 '''
@@ -215,6 +222,136 @@ def drop_duplicate_ips(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def merge_datasets(df1: pd.DataFrame, df2: pd.DataFrame) -> pd.DataFrame:
+    # list of columns to keep
+    columns_to_keep = [
+        'název', 'status', 'souradnice_vzd', 'souradnice_B1', 'souradnice_B2',
+        'souradnice_B3', 'souradnice_A1', 'souradnice_A2', 'souradnice_A3',
+        'souradnice_B4', 'souradnice_B5', 'souradnice_B6', 'souradnice_A4',
+        'souradnice_A5', 'souradnice_A6', 'souradnice_A dec1', 'souradnice_A dec2',
+        'souradnice_B dec1', 'souradnice_B dec2', 'souradnice_A_vyska nad terenem',
+        'souradnice_B_vyska nad terenem', 'souradnice_A dec_komplet', 'souradnice_B dec_komplet'
+    ]
+
+    if '__pk_ID_new_calc' in df1.columns:
+        df1 = df1.rename(columns={'__pk_ID_new_calc': '__pk_ID'})
+
+    if '__pk_ID_new_calc' in df2.columns:
+        df2 = df2.rename(columns={'__pk_ID_new_calc': '__pk_ID'})
+
+    df1 = df1[columns_to_keep + ['__pk_ID']]
+    df2 = df2[columns_to_keep + ['__pk_ID']]
+
+    mg_df = pd.concat([df1, df2], ignore_index=True)
+
+    return mg_df
+
+
+def process_coordinates(input_df: pd.DataFrame) -> pd.DataFrame:
+    # helper function to convert DMS to decimal
+    def dms_to_decimal(degrees, minutes, seconds):
+        return degrees + minutes / 60.0 + seconds / 3600.0
+
+    sites_list = []
+
+    for _, row in input_df.iterrows():
+        for site_type in ['A', 'B']:
+
+            if site_type == 'A':
+                address = row['název'].split(' - ')[0]
+                pk_id = row['__pk_ID']
+                x_dec = row['souradnice_A dec2']
+                y_dec = row['souradnice_A dec1']
+                x_deg = row['souradnice_A4']
+                x_min = row['souradnice_A5']
+                x_sec = row['souradnice_A6']
+                y_deg = row['souradnice_A1']
+                y_min = row['souradnice_A2']
+                y_sec = row['souradnice_A3']
+                height = row['souradnice_A_vyska nad terenem']
+
+            else:
+                address = row['název'].split(' - ')[1]
+                pk_id = row['__pk_ID']
+                x_dec = row['souradnice_B dec2']
+                y_dec = row['souradnice_B dec1']
+                x_deg = row['souradnice_B4']
+                x_min = row['souradnice_B5']
+                x_sec = row['souradnice_B6']
+                y_deg = row['souradnice_B1']
+                y_min = row['souradnice_B2']
+                y_sec = row['souradnice_B3']
+                height = row['souradnice_B_vyska nad terenem']
+
+            # extract city from address
+            city = address.split('_')[0] if '_' in address else np.nan
+
+            # compute X and Y coordinates
+            if pd.isnull(x_dec):
+                if all(pd.notnull([x_deg, x_min, x_sec])):
+                    x_dec = dms_to_decimal(x_deg, x_min, x_sec)
+                else:
+                    print(f"NO DATA for address: {address} on CML: {pk_id}")
+                    continue
+
+            if pd.isnull(y_dec):
+                if all(pd.notnull([y_deg, y_min, y_sec])):
+                    y_dec = dms_to_decimal(y_deg, y_min, y_sec)
+                else:
+                    print(f"NO DATA for address: {address} on CML: {pk_id}")
+                    continue
+
+            # helper function for correcting the decimal point in some weirdly formatted source coordinates
+            def fix_decimal_after_two_digits(num):
+                s = str(int(num))  # Convert to string, removing any decimal if present
+                return float(s[:2] + '.' + s[2:])
+
+            if x_dec > 180:
+                print(f"X coordinate of CML: {pk_id} is broken (X: {x_dec}, fixing decimal point.)")
+                x_dec = fix_decimal_after_two_digits(x_dec)
+            if y_dec > 90:
+                print(f"Y coordinate of CML: {pk_id} is broken (Y: {y_dec}, fixing decimal point.)")
+                y_dec = fix_decimal_after_two_digits(y_dec)
+
+            # check for swapped coordinates
+            if (x_dec < AREA_BORDER_X_MIN) or (x_dec > AREA_BORDER_X_MAX):
+                if y_dec < AREA_BORDER_Y_MIN:
+                    x_dec, y_dec = y_dec, x_dec
+                    print(f"Swapped coordinates on CML: {pk_id}! Corrected.")
+                else:
+                    print(f"Invalid X coordinate (X: {x_dec}, Y: {y_dec}) on CML: {pk_id}. Skipping.")
+                    continue
+
+            # check for invalid coordinate
+            if (y_dec < AREA_BORDER_Y_MIN) or (y_dec > AREA_BORDER_Y_MAX):
+                print(f"Invalid Y coordinate (X: {x_dec}, Y: {y_dec}) on CML: {pk_id}. Skipping.")
+                continue
+
+            existing_site = next((site for site in sites_list if site['address'].lower() == address.lower()), None)
+
+            if existing_site:
+                # check for data conflict
+                if (abs(existing_site['X_coordinate'] - x_dec) > 0.001) \
+                        or ((existing_site['Y_coordinate'] - y_dec) > 0.001):
+                    print(f"DATA CONFLICT for address: {address}. Original (X: {existing_site['X_coordinate']}, "
+                          f"Y: {existing_site['Y_coordinate']}). New (X: {x_dec}, Y: {y_dec}) on CML: {pk_id}")
+            else:
+                sites_list.append({
+                    'address': address,
+                    'city': city,
+                    'X_coordinate': x_dec,
+                    'Y_coordinate': y_dec,
+                    'X_dummy_coordinate': np.nan,
+                    'Y_dummy_coordinate': np.nan,
+                    'height_above_terrain': height
+                })
+
+    st_df = pd.DataFrame(sites_list)
+    st_df.set_index('address', inplace=True)
+
+    return st_df
+
+
 if __name__ == '__main__':
     args = sys.argv[1:]
 
@@ -320,6 +457,16 @@ if __name__ == '__main__':
     logger.info("Remove duplicate IPs from MCL data...")
     mcl_df = drop_duplicate_ips(mcl_df)
     logger.info("**********************************************")
+
+    # merge CBL and MCL datasets before processing coordinates
+    logger.info("Merging CBL and MCL datasets before processing coordinates...")
+    merged_df = merge_datasets(cbl_df, mcl_df)
+    logger.info("OK.")
+
+    # process coordinates
+    logger.info("Processing coordinates and creating sites list...")
+    sites_df = process_coordinates(merged_df)
+    logger.info("OK.")
 
 
 
