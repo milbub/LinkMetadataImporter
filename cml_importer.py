@@ -34,7 +34,8 @@ logger.setLevel(logging.DEBUG)
 t = datetime.now()
 Path("./logs").mkdir(parents=True, exist_ok=True)
 file_handler = logging.FileHandler(f'./logs/IMPORT_{t.year}-{t.month:02d}-{t.day:02d}_'
-                                   f'{t.hour:02d}-{t.minute:02d}-{t.second:02d}.log')
+                                   f'{t.hour:02d}-{t.minute:02d}-{t.second:02d}.log',
+                                   'w', encoding='utf-8')
 file_handler.setLevel(logging.DEBUG)
 
 # create a console handler and set its level
@@ -252,6 +253,12 @@ def process_coordinates(input_df: pd.DataFrame) -> pd.DataFrame:
     def dms_to_decimal(degrees, minutes, seconds):
         return degrees + minutes / 60.0 + seconds / 3600.0
 
+    msgs_no_data = []
+    msgs_broken_coord = []
+    msgs_swapped_coord = []
+    msgs_invalid_coord = []
+    msgs_conflict_coord = []
+
     sites_list = []
 
     for _, row in input_df.iterrows():
@@ -291,14 +298,14 @@ def process_coordinates(input_df: pd.DataFrame) -> pd.DataFrame:
                 if all(pd.notnull([x_deg, x_min, x_sec])):
                     x_dec = dms_to_decimal(x_deg, x_min, x_sec)
                 else:
-                    print(f"NO DATA for address: {address} on CML: {pk_id}")
+                    msgs_no_data.append(f"NO DATA for address: {address} on CML: {pk_id}")
                     continue
 
             if pd.isnull(y_dec):
                 if all(pd.notnull([y_deg, y_min, y_sec])):
                     y_dec = dms_to_decimal(y_deg, y_min, y_sec)
                 else:
-                    print(f"NO DATA for address: {address} on CML: {pk_id}")
+                    msgs_no_data.append(f"NO DATA for address: {address} on CML: {pk_id}")
                     continue
 
             # helper function for correcting the decimal point in some weirdly formatted source coordinates
@@ -307,24 +314,25 @@ def process_coordinates(input_df: pd.DataFrame) -> pd.DataFrame:
                 return float(s[:2] + '.' + s[2:])
 
             if x_dec > 180:
-                print(f"X coordinate of CML: {pk_id} is broken (X: {x_dec}, fixing decimal point.)")
+                msgs_broken_coord.append(f"X coordinate of CML: {pk_id} is broken (X: {x_dec}, fixing decimal point.)")
                 x_dec = fix_decimal_after_two_digits(x_dec)
             if y_dec > 90:
-                print(f"Y coordinate of CML: {pk_id} is broken (Y: {y_dec}, fixing decimal point.)")
+                msgs_broken_coord.append(f"Y coordinate of CML: {pk_id} is broken (Y: {y_dec}, fixing decimal point.)")
                 y_dec = fix_decimal_after_two_digits(y_dec)
 
             # check for swapped coordinates
             if (x_dec < AREA_BORDER_X_MIN) or (x_dec > AREA_BORDER_X_MAX):
                 if y_dec < AREA_BORDER_Y_MIN:
                     x_dec, y_dec = y_dec, x_dec
-                    print(f"Swapped coordinates on CML: {pk_id}! Corrected.")
+                    msgs_swapped_coord.append(f"Swapped coordinates on CML: {pk_id}! Corrected.")
                 else:
-                    print(f"Invalid X coordinate (X: {x_dec}, Y: {y_dec}) on CML: {pk_id}. Skipping.")
+                    msgs_invalid_coord.append(f"Invalid X coordinate (X: {x_dec}, Y: {y_dec}) on CML: {pk_id}. "
+                                              f"Skipping.")
                     continue
 
             # check for invalid coordinate
             if (y_dec < AREA_BORDER_Y_MIN) or (y_dec > AREA_BORDER_Y_MAX):
-                print(f"Invalid Y coordinate (X: {x_dec}, Y: {y_dec}) on CML: {pk_id}. Skipping.")
+                msgs_invalid_coord.append(f"Invalid Y coordinate (X: {x_dec}, Y: {y_dec}) on CML: {pk_id}. Skipping.")
                 continue
 
             existing_site = next((site for site in sites_list if site['address'].lower() == address.lower()), None)
@@ -333,8 +341,9 @@ def process_coordinates(input_df: pd.DataFrame) -> pd.DataFrame:
                 # check for data conflict
                 if (abs(existing_site['X_coordinate'] - x_dec) > 0.001) \
                         or ((existing_site['Y_coordinate'] - y_dec) > 0.001):
-                    print(f"DATA CONFLICT for address: {address}. Original (X: {existing_site['X_coordinate']}, "
-                          f"Y: {existing_site['Y_coordinate']}). New (X: {x_dec}, Y: {y_dec}) on CML: {pk_id}")
+                    msgs_conflict_coord.append(f"DATA CONFLICT for address: {address}. Original (X: "
+                                               f"{existing_site['X_coordinate']}, Y: {existing_site['Y_coordinate']}). "
+                                               f"New (X: {x_dec}, Y: {y_dec}) on CML: {pk_id}")
             else:
                 sites_list.append({
                     'address': address,
@@ -348,6 +357,10 @@ def process_coordinates(input_df: pd.DataFrame) -> pd.DataFrame:
 
     st_df = pd.DataFrame(sites_list)
     st_df.set_index('address', inplace=True)
+
+    for msgs in [msgs_no_data, msgs_broken_coord, msgs_invalid_coord, msgs_swapped_coord, msgs_conflict_coord]:
+        for msg in msgs:
+            logger.debug(msg)
 
     return st_df
 
