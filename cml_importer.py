@@ -16,10 +16,16 @@ This script IS NOT UNIVERSAL in any way nor is designed like that.
 """
 
 
-AREA_BORDER_X_MIN = 11
-AREA_BORDER_X_MAX = 20
-AREA_BORDER_Y_MIN = 48
-AREA_BORDER_Y_MAX = 52
+AREA_BORDER_X_MIN = 11  # MIN X coordinate of processed area in degrees (now Czechia with surrounding border regions)
+AREA_BORDER_X_MAX = 20  # MAX X coordinate of processed area in degrees (now Czechia with surrounding border regions)
+AREA_BORDER_Y_MIN = 48  # MIN Y coordinate of processed area in degrees (now Czechia with surrounding border regions)
+AREA_BORDER_Y_MAX = 52  # MAX Y coordinate of processed area in degrees (now Czechia with surrounding border regions)
+
+COORD_CHECK_TOLERANCE = 0.001  # tolerance for duplicity coordinates check in degrees
+HEIGHT_CHECK_TOLERANCE = 5  # tolerance for duplicity height check in meters
+
+RANDOM_SHIFT_MIN = 500  # minimum radius of dummy coordinate shift in meters
+RANDOM_SHIFT_MAX = 1500  # maximum radius of dummy coordinate shift in meters
 
 
 '''
@@ -258,6 +264,7 @@ def process_coordinates(input_df: pd.DataFrame) -> pd.DataFrame:
     msgs_swapped_coord = []
     msgs_invalid_coord = []
     msgs_conflict_coord = []
+    msgs_conflict_height = []
 
     sites_list = []
 
@@ -339,11 +346,22 @@ def process_coordinates(input_df: pd.DataFrame) -> pd.DataFrame:
 
             if existing_site:
                 # check for data conflict
-                if (abs(existing_site['X_coordinate'] - x_dec) > 0.001) \
-                        or ((existing_site['Y_coordinate'] - y_dec) > 0.001):
+                if (abs(existing_site['X_coordinate'] - x_dec) > COORD_CHECK_TOLERANCE) \
+                        or ((existing_site['Y_coordinate'] - y_dec) > COORD_CHECK_TOLERANCE):
                     msgs_conflict_coord.append(f"DATA CONFLICT for address: {address}. Original (X: "
                                                f"{existing_site['X_coordinate']}, Y: {existing_site['Y_coordinate']}). "
                                                f"New (X: {x_dec}, Y: {y_dec}) on CML: {pk_id}")
+
+                # check and update height_above_terrain
+                if pd.isnull(existing_site['height_above_terrain']) and pd.notnull(height):
+                    existing_site['height_above_terrain'] = height
+                    # logger.debug(f"Updated 'height_above_terrain' for address: {address} to value: "
+                    #              f"{height} m from CML: {pk_id}.")
+                elif pd.notnull(existing_site['height_above_terrain']) and pd.notnull(height) and \
+                        (abs(existing_site['height_above_terrain'] - height) > HEIGHT_CHECK_TOLERANCE):
+                    msgs_conflict_height.append(f"DATA CONFLICT for height at address: {address}. "
+                                                f"Original: {existing_site['height_above_terrain']} m. "
+                                                f"New: {height} m on CML: {pk_id}.")
             else:
                 sites_list.append({
                     'address': address,
@@ -358,7 +376,8 @@ def process_coordinates(input_df: pd.DataFrame) -> pd.DataFrame:
     st_df = pd.DataFrame(sites_list)
     st_df.set_index('address', inplace=True)
 
-    for msgs in [msgs_no_data, msgs_broken_coord, msgs_invalid_coord, msgs_swapped_coord, msgs_conflict_coord]:
+    for msgs in [msgs_no_data, msgs_broken_coord, msgs_invalid_coord,
+                 msgs_swapped_coord, msgs_conflict_coord, msgs_conflict_height]:
         for msg in msgs:
             logger.debug(msg)
 
