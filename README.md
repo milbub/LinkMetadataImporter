@@ -4,4 +4,4 @@
 
 * Tested Python version: 3.10
 
-* Required packages: mariadb, pandas, openpyxl
+* Required packages: mariadb, pandas, numpy, openpyxl, requests

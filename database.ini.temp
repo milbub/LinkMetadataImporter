@@ -5,3 +5,4 @@ user=
 pass=
 timeout=1000
 db_metadata=cml_metadata
+gmaps_api_key=

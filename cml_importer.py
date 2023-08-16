@@ -1,20 +1,28 @@
-from mariadb import Cursor
 from datetime import datetime
 from pathlib import Path
-import sys
 import pandas as pd
 import numpy as np
+import sys
+import requests
 import mariadb
 import configparser
 import logging
 import re
+import random
+import math
 
 
 """
+DISCLAIMER:
 This script is used for import of CML metadata of specific CML ISP into the Telcorain's SQL database structure.
 This script IS NOT UNIVERSAL in any way nor is designed like that.
 """
 
+"""
+START CONFIGURATION OPTIONS
+"""
+
+FETCH_ALT_FROM_GMAPS = False
 
 AREA_BORDER_X_MIN = 11  # MIN X coordinate of processed area in degrees (now Czechia with surrounding border regions)
 AREA_BORDER_X_MAX = 20  # MAX X coordinate of processed area in degrees (now Czechia with surrounding border regions)
@@ -27,9 +35,12 @@ HEIGHT_CHECK_TOLERANCE = 5  # tolerance for duplicity height check in meters
 RANDOM_SHIFT_MIN = 500  # minimum radius of dummy coordinate shift in meters
 RANDOM_SHIFT_MAX = 1500  # maximum radius of dummy coordinate shift in meters
 
+"""
+END CONFIGURATION OPTIONS
+"""
 
 '''
-Start logging setup
+START LOGGING SETUP
 '''
 
 # create a logger
@@ -60,7 +71,7 @@ logger.addHandler(file_handler)
 logger.addHandler(console_handler)
 
 '''
-End logging setup
+END LOGGING SETUP
 '''
 
 
@@ -79,7 +90,7 @@ def check_path(path):
         raise FileNotFoundError(error)
 
 
-def load_db_settings(path) -> {}:
+def load_settings(path) -> {}:
     def read_option(parser, option) -> str:
         if not parser.has_option('mariadb', option):
             error = "ERROR: Missing option in DB configuration file. Check the config!"
@@ -98,6 +109,7 @@ def load_db_settings(path) -> {}:
         'pass': read_option(p, 'pass'),
         'timeout': read_option(p, 'timeout'),
         'db_metadata': read_option(p, 'db_metadata'),
+        'gmaps_api_key': read_option(p, 'gmaps_api_key')
     }
 
     return settings
@@ -272,7 +284,7 @@ def process_coordinates(input_df: pd.DataFrame) -> pd.DataFrame:
         for site_type in ['A', 'B']:
 
             if site_type == 'A':
-                address = row['název'].split(' - ')[0]
+                address = row['název'].split(' - ')[0].strip()
                 pk_id = row['__pk_ID']
                 x_dec = row['souradnice_A dec2']
                 y_dec = row['souradnice_A dec1']
@@ -285,7 +297,7 @@ def process_coordinates(input_df: pd.DataFrame) -> pd.DataFrame:
                 height = row['souradnice_A_vyska nad terenem']
 
             else:
-                address = row['název'].split(' - ')[1]
+                address = row['název'].split(' - ')[1].strip()
                 pk_id = row['__pk_ID']
                 x_dec = row['souradnice_B dec2']
                 y_dec = row['souradnice_B dec1']
@@ -342,14 +354,17 @@ def process_coordinates(input_df: pd.DataFrame) -> pd.DataFrame:
                 msgs_invalid_coord.append(f"Invalid Y coordinate (X: {x_dec}, Y: {y_dec}) on CML: {pk_id}. Skipping.")
                 continue
 
-            existing_site = next((site for site in sites_list if site['address'].lower() == address.lower()), None)
+            existing_site = next((site for site in sites_list
+                                  if site['address'].lower().strip() == address.lower().strip()), None)
 
             if existing_site:
                 # check for data conflict
-                if (abs(existing_site['X_coordinate'] - x_dec) > COORD_CHECK_TOLERANCE) \
-                        or ((existing_site['Y_coordinate'] - y_dec) > COORD_CHECK_TOLERANCE):
-                    msgs_conflict_coord.append(f"DATA CONFLICT for address: {address}. Original (X: "
-                                               f"{existing_site['X_coordinate']}, Y: {existing_site['Y_coordinate']}). "
+                diff_x = round(abs(existing_site['X_coordinate'] - x_dec), 3)
+                diff_y = round(abs(existing_site['Y_coordinate'] - y_dec), 3)
+                if (diff_x > COORD_CHECK_TOLERANCE) or (diff_y > COORD_CHECK_TOLERANCE):
+                    msgs_conflict_coord.append(f"COORDS CONFLICT (diff: {diff_x}/{diff_y}) at address: {address}. "
+                                               f"Original (X: {existing_site['X_coordinate']}, "
+                                               f"Y: {existing_site['Y_coordinate']}). "
                                                f"New (X: {x_dec}, Y: {y_dec}) on CML: {pk_id}")
 
                 # check and update height_above_terrain
@@ -359,7 +374,7 @@ def process_coordinates(input_df: pd.DataFrame) -> pd.DataFrame:
                     #              f"{height} m from CML: {pk_id}.")
                 elif pd.notnull(existing_site['height_above_terrain']) and pd.notnull(height) and \
                         (abs(existing_site['height_above_terrain'] - height) > HEIGHT_CHECK_TOLERANCE):
-                    msgs_conflict_height.append(f"DATA CONFLICT for height at address: {address}. "
+                    msgs_conflict_height.append(f"HEIGHT CONFLICT at address: {address}. "
                                                 f"Original: {existing_site['height_above_terrain']} m. "
                                                 f"New: {height} m on CML: {pk_id}.")
             else:
@@ -382,6 +397,102 @@ def process_coordinates(input_df: pd.DataFrame) -> pd.DataFrame:
             logger.debug(msg)
 
     return st_df
+
+
+def fetch_altitude(lat, lon, api_key) -> float | None:
+    if FETCH_ALT_FROM_GMAPS:
+        try:
+            url = f"https://maps.googleapis.com/maps/api/elevation/json?locations={lat},{lon}&key={api_key}"
+            response = requests.get(url)
+            result = response.json()
+
+            if result["status"] == "OK":
+                return round(result["results"][0]["elevation"], 2)
+            else:
+                raise ConnectionError(f"Error fetching elevation for {lat}, {lon}. Error: {result['status']}")
+        except BaseException as e:
+            logger.error(e)
+            return None
+    else:
+        return None
+
+
+def calc_dummy_coordinates(x, y) -> (float, float):
+    radius = random.uniform(RANDOM_SHIFT_MIN, RANDOM_SHIFT_MAX) / 1000  # convert to km for calculation
+    angle = random.uniform(0, 2 * math.pi)
+    x_dummy = x + radius * math.cos(angle) / 111.32  # rough conversion of km to degrees
+    y_dummy = y + radius * math.sin(angle) / (111.32 * math.cos(x * math.pi / 180))
+
+    return round(x_dummy, 8), round(y_dummy, 8)
+
+
+def update_sites(sites_dataset: pd.DataFrame, conn, cursor, GMAPS_API_KEY) -> (int, int):
+    # fetch all records from the sites table
+    cursor.execute("SELECT address, X_coordinate, Y_coordinate, height_above_terrain FROM sites")
+    db_sites = cursor.fetchall()
+
+    # fetch column names from cursor description
+    columns = [desc[0] for desc in cursor.description]
+
+    # convert DB results to dictionary
+    db_sites_dict = {}
+    for site in db_sites:
+        site_dict = dict(zip(columns, site))
+        db_sites_dict[site_dict['address']] = site_dict
+
+    update_counter, insert_counter = 0, 0
+
+    for _, row in sites_dataset.iterrows():
+        address = _
+        city = row['city']
+        x = round(row['X_coordinate'], 8)
+        y = round(row['Y_coordinate'], 8)
+        height = row['height_above_terrain']
+
+        if np.isnan(x) or np.isnan(y):
+            continue
+
+        if pd.isna(city):
+            city = None
+
+        if np.isnan(height):
+            height = None
+
+        if address in db_sites_dict:
+            site = db_sites_dict[address]
+
+            if round(site['X_coordinate'], 8) != x or round(site['Y_coordinate'], 8) != y \
+                    or site['height_above_terrain'] != height:
+                # get dummy coords
+                x_dummy, y_dummy = calc_dummy_coordinates(x, y)
+                # get altitude
+                altitude = fetch_altitude(y, x, GMAPS_API_KEY)
+
+                # update the record
+                sql = """UPDATE sites SET X_coordinate = %s, Y_coordinate = %s, height_above_terrain = %s, 
+                                           X_dummy_coordinate = %s, Y_dummy_coordinate = %s, altitude = %s 
+                        WHERE address = %s"""
+                cursor.execute(sql, (x, y, height, x_dummy, y_dummy, altitude, address))
+                logger.debug(f"Updated site: {address} in DB with new coordinates (X: {x}, Y: {y}) "
+                             f"or height ({height} m).")
+                update_counter += 1
+
+        else:
+            # get dummy coords
+            x_dummy, y_dummy = calc_dummy_coordinates(x, y)
+            # get altitude
+            altitude = fetch_altitude(y, x, GMAPS_API_KEY)
+
+            # insert the new record
+            sql = """INSERT INTO sites (address, city, X_coordinate, Y_coordinate, height_above_terrain, 
+                                         X_dummy_coordinate, Y_dummy_coordinate, altitude) 
+                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"""
+            cursor.execute(sql, (address, city, x, y, height, x_dummy, y_dummy, altitude))
+            logger.debug(f"Inserted new site: {address} into the DB.")
+            insert_counter += 1
+
+    conn.commit()
+    return update_counter, insert_counter
 
 
 if __name__ == '__main__':
@@ -422,17 +533,17 @@ if __name__ == '__main__':
     check_path(corrs_xlsx_path)
     check_path(db_config_path)
 
-    # load connection settings
-    db_settings = load_db_settings(db_config_path)
+    # load settings
+    settings = load_settings(db_config_path)
 
     # create and test DB connection
     connection = mariadb.connect(
-        user=db_settings['user'],
-        password=db_settings['pass'],
-        host=db_settings['address'],
-        port=int(db_settings['port']),
-        database=db_settings['db_metadata'],
-        connect_timeout=int(int(db_settings['timeout']) / 1000),
+        user=settings['user'],
+        password=settings['pass'],
+        host=settings['address'],
+        port=int(settings['port']),
+        database=settings['db_metadata'],
+        connect_timeout=int(int(settings['timeout']) / 1000),
         reconnect=True
     )
     check_db_connection(connection)
@@ -500,8 +611,13 @@ if __name__ == '__main__':
     sites_df = process_coordinates(merged_df)
     logger.info("OK.")
 
+    # update sites in DB and fetch altitude if needed
+    logger.info("**********************************************")
+    gmaps_api_key = settings['gmaps_api_key']
+    db_cursor = connection.cursor()
+    logger.info("Updating sites in DB...")
+    updated, inserted = update_sites(sites_df, connection, db_cursor, gmaps_api_key)
+    logger.info(f"OK. {updated} existing sites has been updated, {inserted} new sites has been inserted.")
+    logger.info("**********************************************")
 
-
-
-
-
+    connection.close()
