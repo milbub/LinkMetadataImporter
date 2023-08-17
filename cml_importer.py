@@ -22,7 +22,7 @@ This script IS NOT UNIVERSAL in any way nor is designed like that.
 START CONFIGURATION OPTIONS
 """
 
-FETCH_ALT_FROM_GMAPS = False
+FETCH_ALT_FROM_GMAPS = True
 
 AREA_BORDER_X_MIN = 11  # MIN X coordinate of processed area in degrees (now Czechia with surrounding border regions)
 AREA_BORDER_X_MAX = 20  # MAX X coordinate of processed area in degrees (now Czechia with surrounding border regions)
@@ -249,7 +249,8 @@ def merge_datasets(df1: pd.DataFrame, df2: pd.DataFrame) -> pd.DataFrame:
         'souradnice_B4', 'souradnice_B5', 'souradnice_B6', 'souradnice_A4',
         'souradnice_A5', 'souradnice_A6', 'souradnice_A dec1', 'souradnice_A dec2',
         'souradnice_B dec1', 'souradnice_B dec2', 'souradnice_A_vyska nad terenem',
-        'souradnice_B_vyska nad terenem', 'souradnice_A dec_komplet', 'souradnice_B dec_komplet'
+        'souradnice_B_vyska nad terenem', 'souradnice_A dec_komplet', 'souradnice_B dec_komplet',
+        'A IP adresa', 'B IP adresa', 'technologie_Nis', 'NAST_A_frq', 'NAST_B_frq', 'NAST_A_polarizace'
     ]
 
     if '__pk_ID_new_calc' in df1.columns:
@@ -495,6 +496,145 @@ def update_sites(sites_dataset: pd.DataFrame, conn, cursor, GMAPS_API_KEY) -> (i
     return update_counter, insert_counter
 
 
+def update_links(input_df, conn, cursor) -> (float, float, float, float):
+    # splitting 'název' column to sites A and B
+    input_df['site_A'] = input_df['název'].str.split(' - ').str[0].str.strip()
+    input_df['site_B'] = input_df['název'].str.split(' - ').str[1].str.strip()
+
+    # remove 'MW' from IDs and convert them into integers
+    input_df['__pk_ID'] = input_df['__pk_ID'].str[2:].astype(int)
+
+    # remove port numbers from IP addresses
+    input_df['A IP adresa'] = input_df['A IP adresa'].str.split(':').str[0]
+    input_df['B IP adresa'] = input_df['B IP adresa'].str.split(':').str[0]
+
+    # querying the 'links' table and joining with 'sites' and 'technologies'
+    cursor.execute("""
+        SELECT 
+            links.ISP_ID, 
+            links.is_active, 
+            links.IP_address_A, 
+            links.IP_address_B,
+            links.frequency_A, 
+            links.frequency_B, 
+            links.polarization,
+            A.address as site_A_address, 
+            B.address as site_B_address,
+            tech.ISP_ID as technology_ISP_ID 
+        FROM links
+        JOIN sites A ON links.site_A = A.ID
+        JOIN sites B ON links.site_B = B.ID
+        JOIN technologies tech ON links.technology = tech.ID
+    """)
+
+    db_links = cursor.fetchall()
+
+    # fetch column names from cursor description
+    columns = [desc[0] for desc in cursor.description]
+
+    # convert DB results to dictionary
+    links_dict = {}
+    for link in db_links:
+        link_dict = dict(zip(columns, link))
+        links_dict[link_dict['ISP_ID']] = link_dict
+
+    counter_skipped, counter_updated, counter_inserted, counter_deactivated = 0, 0, 0, 0
+
+    for _, row in input_df.iterrows():
+        current_id = row['__pk_ID']
+
+        # retrieve IDs from 'sites' and 'technologies' tables
+        cursor.execute("SELECT ID FROM sites WHERE address = %s", (row['site_A'],))
+        fetched_A_id = cursor.fetchone()
+        if fetched_A_id is not None:
+            site_A_id = fetched_A_id[0]
+        else:
+            logger.debug(f"Cannot find address '{row['site_A']}' in DB for CML: {current_id}, skipping CML.")
+            counter_skipped += 1
+            continue
+
+        cursor.execute("SELECT ID FROM sites WHERE address = %s", (row['site_B'],))
+        fetched_B_id = cursor.fetchone()
+        if fetched_B_id is not None:
+            site_B_id = fetched_B_id[0]
+        else:
+            logger.debug(f"Cannot find address '{row['site_B']}' in DB for CML: {current_id}, skipping CML.")
+            counter_skipped += 1
+            continue
+
+        cursor.execute("SELECT ID FROM technologies WHERE ISP_ID = %s", (row['technologie_Nis'],))
+        fetched_tech_id = cursor.fetchone()
+        if fetched_tech_id is not None:
+            technology_id = fetched_tech_id[0]
+        else:
+            logger.debug(f"Cannot find technology {row['technologie_Nis']} in DB for CML: {current_id}, skipping CML.")
+            counter_skipped += 1
+            continue
+
+        # if current ID exists in db
+        if current_id in links_dict:
+            link_data = links_dict[current_id]
+
+            # check differences and update if needed
+            updates = []
+            if link_data['is_active'] != 1:
+                updates.append("is_active = 1")
+            if link_data['IP_address_A'] != row['A IP adresa']:
+                updates.append("IP_address_A = '{}'".format(row['A IP adresa']))
+            if link_data['IP_address_B'] != row['B IP adresa']:
+                updates.append("IP_address_B = '{}'".format(row['B IP adresa']))
+            if link_data['frequency_A'] != row['NAST_A_frq']:
+                updates.append("frequency_A = '{}'".format(row['NAST_A_frq']))
+            if link_data['frequency_B'] != row['NAST_B_frq']:
+                updates.append("frequency_B = '{}'".format(row['NAST_B_frq']))
+            if link_data['polarization'] != row['NAST_A_polarizace']:
+                updates.append("polarization = '{}'".format(row['NAST_A_polarizace']))
+            if link_data['site_A_address'] != row['site_A']:
+                updates.append("site_A = {}".format(site_A_id))
+            if link_data['site_B_address'] != row['site_B']:
+                updates.append("site_B = {}".format(site_B_id))
+            if link_data['technology_ISP_ID'] != row['technologie_Nis']:
+                updates.append("technology = {}".format(technology_id))
+
+            if updates:
+                update_query = "UPDATE links SET {} WHERE ISP_ID = %s".format(", ".join(updates))
+                cursor.execute(update_query, (current_id,))
+
+                # update the modify_time
+                cursor.execute("UPDATE links SET modify_time = %s WHERE ISP_ID = %s", (datetime.utcnow(), current_id))
+
+                logger.debug(f"Updated CML: {current_id} with new data.")
+                counter_updated += 1
+
+            # remove the processed row from links_dict
+            del links_dict[current_id]
+
+        else:
+            # insert a new row into links table
+            cursor.execute("""
+                INSERT INTO links (ISP_ID, is_active, IP_address_A, IP_address_B, frequency_A, frequency_B, 
+                polarization, site_A, site_B, technology, import_time)
+                VALUES (%s, 1, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (current_id, row['A IP adresa'], row['B IP adresa'], row['NAST_A_frq'], row['NAST_B_frq'],
+                  row['NAST_A_polarizace'], site_A_id, site_B_id, technology_id, datetime.utcnow()))
+
+            logger.debug(f"Inserted CML: {current_id} into the DB.")
+            counter_inserted += 1
+
+    # update remaining rows in links_dict as inactive
+    for remaining_id in links_dict.keys():
+        cursor.execute("""UPDATE links SET is_active = 0 WHERE ISP_ID = %s""", (remaining_id,))
+
+        # update the modify_time
+        cursor.execute("UPDATE links SET modify_time = %s WHERE ISP_ID = %s", (datetime.utcnow(), remaining_id))
+
+        counter_deactivated += 1
+
+    conn.commit()
+
+    return counter_skipped, counter_updated, counter_inserted, counter_deactivated
+
+
 if __name__ == '__main__':
     args = sys.argv[1:]
 
@@ -620,4 +760,10 @@ if __name__ == '__main__':
     logger.info(f"OK. {updated} existing sites has been updated, {inserted} new sites has been inserted.")
     logger.info("**********************************************")
 
+    # update links in DB
+    logger.info("Updating links in DB...")
+    skipped, updated, inserted, deactivated = update_links(merged_df, connection, db_cursor)
+    logger.info(f"OK. {skipped} CMLs has been skipped due invalid data. {updated} CMLs has been updated, {inserted} "
+                f"new CMLs has been inserted. {deactivated} CMLs has been deactivated.")
+    logger.info(f"Processing done. END.")
     connection.close()
