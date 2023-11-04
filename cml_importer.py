@@ -14,7 +14,7 @@ import math
 
 """
 DISCLAIMER:
-This script is used for import of CML metadata of specific CML ISP into the Telcorain's SQL database structure.
+This script is used for import of CML metadata of specific CML provider into the Telcorain's SQL database structure.
 This script IS NOT UNIVERSAL in any way nor is designed like that.
 """
 
@@ -29,8 +29,8 @@ AREA_BORDER_X_MAX = 20  # MAX X coordinate of processed area in degrees (now Cze
 AREA_BORDER_Y_MIN = 48  # MIN Y coordinate of processed area in degrees (now Czechia with surrounding border regions)
 AREA_BORDER_Y_MAX = 52  # MAX Y coordinate of processed area in degrees (now Czechia with surrounding border regions)
 
-COORD_CHECK_TOLERANCE = 0.001  # tolerance for duplicity coordinates check in degrees
-HEIGHT_CHECK_TOLERANCE = 5  # tolerance for duplicity height check in meters
+COORD_CHECK_TOLERANCE = 0.001  # tolerance for coordinates duplicity check in degrees
+HEIGHT_CHECK_TOLERANCE = 5  # tolerance for height duplicity check in meters
 
 RANDOM_SHIFT_MIN = 500  # minimum radius of dummy coordinate shift in meters
 RANDOM_SHIFT_MAX = 1500  # maximum radius of dummy coordinate shift in meters
@@ -269,9 +269,26 @@ def merge_datasets(df1: pd.DataFrame, df2: pd.DataFrame) -> pd.DataFrame:
 
 def process_coordinates(input_df: pd.DataFrame) -> pd.DataFrame:
     # helper function to convert DMS to decimal
-    def dms_to_decimal(degrees, minutes, seconds):
+    def dms_to_decimal(degrees, minutes, seconds) -> float:
         return degrees + minutes / 60.0 + seconds / 3600.0
 
+    # helper function for correcting the decimal point in some weirdly formatted decimal coordinates
+    def fix_decimal_after_two_digits(num) -> float:
+        s = str(int(num))  # Convert to string, removing any decimal if present
+        if len(s) < 3:
+            return float(s)
+
+        return float(s[:2] + '.' + s[2:])
+
+    # another helper function for correcting the decimal point in some weirdly formatted degree coordinates
+    def fix_decimal_before_last_three_digits(num) -> float:
+        s = str(int(num))  # Convert to string, removing any decimal if present
+        if len(s) <= 3:
+            return float("0." + s)
+
+        return float(s[:-3] + "." + s[-3:])
+
+    # accumulate log messages and then print them all the same type at once
     msgs_no_data = []
     msgs_broken_coord = []
     msgs_swapped_coord = []
@@ -313,25 +330,43 @@ def process_coordinates(input_df: pd.DataFrame) -> pd.DataFrame:
             # extract city from address
             city = address.split('_')[0] if '_' in address else np.nan
 
+            # helper function for checking data consistency of degree coordinates and fix weirdly formatted seconds
+            def check_dms_format(degrees, minutes, seconds) -> (float, float, float):
+                if degrees > 60 or minutes > 60:
+                    msgs_invalid_coord.append(f"Invalid degree coordinate on CML: {pk_id}. Degrees/minutes value is "
+                                              f"larger than 60 (deg: {degrees}, min: {minutes}, sec: {seconds}). "
+                                              f"Skipping.")
+
+                    return np.nan, np.nan, np.nan
+                if seconds > 60:
+                    msgs_broken_coord.append(f"Seconds part of degree coordinate of CML: {pk_id} is broken (deg: "
+                                             f"{degrees}, min: {minutes}, sec: {seconds}), fixing decimal point.)")
+                    seconds = fix_decimal_before_last_three_digits(seconds)
+
+                return degrees, minutes, seconds
+
             # compute X and Y coordinates
             if pd.isnull(x_dec):
                 if all(pd.notnull([x_deg, x_min, x_sec])):
+                    x_deg, x_min, x_sec = check_dms_format(x_deg, x_min, x_sec)
+                    if all(pd.isnull([x_deg, x_min, x_sec])):
+                        continue
+
                     x_dec = dms_to_decimal(x_deg, x_min, x_sec)
                 else:
-                    msgs_no_data.append(f"NO DATA for address: {address} on CML: {pk_id}")
+                    msgs_no_data.append(f"NO DATA for address: {address} on CML: {pk_id}. Skipping.")
                     continue
 
             if pd.isnull(y_dec):
                 if all(pd.notnull([y_deg, y_min, y_sec])):
+                    y_deg, y_min, y_sec = check_dms_format(y_deg, y_min, y_sec)
+                    if all(pd.isnull([y_deg, y_min, y_sec])):
+                        continue
+
                     y_dec = dms_to_decimal(y_deg, y_min, y_sec)
                 else:
-                    msgs_no_data.append(f"NO DATA for address: {address} on CML: {pk_id}")
+                    msgs_no_data.append(f"NO DATA for address: {address} on CML: {pk_id}. Skipping.")
                     continue
-
-            # helper function for correcting the decimal point in some weirdly formatted source coordinates
-            def fix_decimal_after_two_digits(num):
-                s = str(int(num))  # Convert to string, removing any decimal if present
-                return float(s[:2] + '.' + s[2:])
 
             if x_dec > 180:
                 msgs_broken_coord.append(f"X coordinate of CML: {pk_id} is broken (X: {x_dec}, fixing decimal point.)")
@@ -392,6 +427,7 @@ def process_coordinates(input_df: pd.DataFrame) -> pd.DataFrame:
     st_df = pd.DataFrame(sites_list)
     st_df.set_index('address', inplace=True)
 
+    # print log messages
     for msgs in [msgs_no_data, msgs_broken_coord, msgs_invalid_coord,
                  msgs_swapped_coord, msgs_conflict_coord, msgs_conflict_height]:
         for msg in msgs:
