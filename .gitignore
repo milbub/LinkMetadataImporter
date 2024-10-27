@@ -1,0 +1,5 @@
+venv/
+.venv/
+.idea/
+logs/
+database.ini
