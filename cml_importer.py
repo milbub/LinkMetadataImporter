@@ -684,7 +684,7 @@ if __name__ == '__main__':
         if len(args) >= 4:
             db_config_path = args[3]
         else:
-            db_config_path = './database.ini'
+            db_config_path = 'config.ini'
     else:
         cbl_xlsx_path = input("Please enter a full path to the CBL's exported XLSX file: ")
         cbl_xlsx_path = cbl_xlsx_path.replace('"', '').replace("'", "")
@@ -695,11 +695,11 @@ if __name__ == '__main__':
         corrs_xlsx_path = input("Please enter a full path to a corrections XLSX file: ")
         corrs_xlsx_path = corrs_xlsx_path.replace('"', '').replace("'", "")
 
-        db_config_path = input("Default DB configuration file's name is 'database.ini' and is located in the same "
+        db_config_path = input("Default DB configuration file's name is 'config.ini' and is located in the same "
                                "directory, as this script.\nIn case of different name or path, please enter a full path"
                                " to this file, or left it empty: ")
         if db_config_path == '':
-            db_config_path = './database.ini'
+            db_config_path = 'config.ini'
         else:
             db_config_path = db_config_path.replace('"', '').replace("'", "")
 

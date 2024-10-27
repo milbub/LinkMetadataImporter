@@ -2,4 +2,4 @@ venv/
 .venv/
 .idea/
 logs/
-database.ini
+config.ini
