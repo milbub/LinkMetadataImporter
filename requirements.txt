@@ -1,0 +1,5 @@
+mariadb
+pandas
+numpy
+openpyxl
+requests
